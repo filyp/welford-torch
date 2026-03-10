@@ -41,13 +41,28 @@ class OnlineCovariance:
             for elem in elements:
                 self.add(elem)
 
+    def _pack_cov(self, full):
+        """Pack a full symmetric matrix into upper triangle (flattened)."""
+        rows, cols = torch.triu_indices(self.__order[-1], self.__order[-1], device=self.__device)
+        return full[..., rows, cols]
+
+    def _unpack_cov(self):
+        """Unpack stored upper triangle into full symmetric matrix."""
+        rows, cols = torch.triu_indices(self.__order[-1], self.__order[-1], device=self.__device)
+        full = torch.zeros(self.__shape, dtype=self.__dtype, device=self.__device)
+        full[..., rows, cols] = self.__cov
+        full[..., cols, rows] = self.__cov
+        return full
+
     def init_zeros(self, element, device=None):
         self.__device = element.device if (device is None) else device
         self.__order = element.shape
         self.__shape = torch.Size((*self.__order, self.__order[-1]))
         self.__count = 0
         self.__mean = torch.zeros(self.__order, dtype=self.__dtype, device=self.__device)
-        self.__cov = torch.zeros((self.__shape), dtype=self.__dtype, device=self.__device)
+        n = self.__order[-1]
+        packed_size = n * (n + 1) // 2
+        self.__cov = torch.zeros((*self.__shape[:-2], packed_size), dtype=self.__dtype, device=self.__device)
         self.__identity = \
             torch.eye(
                 self.__shape[-1], dtype=self.__dtype, device=self.__device
@@ -76,7 +91,7 @@ class OnlineCovariance:
         """
         tensor, The covariance matrix of the added data.
         """
-        return self.__cov
+        return self._unpack_cov()
 
     @property
     def corrcoef(self):
@@ -86,9 +101,10 @@ class OnlineCovariance:
         """
         if self.__count < 1:
             return None
-        variances = torch.diagonal(self.__cov, dim1=-2, dim2=-1)
+        full_cov = self._unpack_cov()
+        variances = torch.diagonal(full_cov, dim1=-2, dim2=-1)
         denominator = torch.sqrt(variances[..., None, :] * variances[..., :, None])
-        return self.__cov / denominator
+        return full_cov / denominator
 
     @property
     def var_p(self):
@@ -161,7 +177,7 @@ class OnlineCovariance:
         ein_string = "... pos_i, ... pos_j -> ... pos_i pos_j"
         D = einops.einsum(delta_x, delta_x_2_weighted, ein_string)
 
-        self.__cov = self.__cov * (self.__count - 1) / self.__count + D
+        self.__cov = self.__cov * (self.__count - 1) / self.__count + self._pack_cov(D)
 
     def add_all(self, xs):
         """ add_all
@@ -199,7 +215,7 @@ class OnlineCovariance:
         ein_string = "n_tokens ... pos_i, n_tokens ... pos_j -> ... pos_i pos_j"
         batch_cov_update = einops.einsum(delta_xs, delta_xs_2, ein_string) / self.__count
         self.__cov.mul_((self.__count-n)/self.__count)
-        self.__cov.add_(batch_cov_update)
+        self.__cov.add_(self._pack_cov(batch_cov_update))
 
         return self
 
@@ -233,9 +249,10 @@ class OnlineCovariance:
 
         flat_mean_diff = self.__mean - other.__mean
         mean_diffs = self.__expand_last_dim(flat_mean_diff)
+        mean_diff_cov = self._pack_cov(mean_diffs * mean_diffs.transpose(-2, -1))
         __merged_cov = (self.__cov * self.count \
                            + other.__cov * other.count \
-                           + mean_diffs * mean_diffs.transpose(-2, -1) * count_corr) \
+                           + mean_diff_cov * count_corr) \
                           / __merged_count
 
         # Update the current object.
@@ -255,7 +272,7 @@ class OnlineCovariance:
         if self.__count <= min_count:
             return torch.full(self.__order, torch.nan, dtype=self.__dtype).to(self.__device)
         else:
-            variances = torch.diagonal(self.__cov, dim1=-2, dim2=-1)
+            variances = torch.diagonal(self._unpack_cov(), dim1=-2, dim2=-1)
             if ddof == 0:
                 return variances
             return variances *  ( self.__count/(self.__count-ddof) )
@@ -286,7 +303,7 @@ class OnlineCovariance:
 
         # Initialize the eigenvectors tensor
         flat_shape = (-1, *self.__shape[-2:])
-        self.__eig_vectors = self.__cov.clone().reshape(flat_shape)
+        self.__eig_vectors = self._unpack_cov().reshape(flat_shape)
         self.__eig_values = []
 
         for i in range(self.__eig_vectors.shape[0]):
@@ -349,6 +366,6 @@ class OnlineCovariance:
         self.__detached = True
         if not (self.__shape is None):
             self.__mean = self.__mean.detach()
-            self.__cov  = self.__cov.detach()
+            self.__cov = self.__cov.detach()
             self.__identity = self.__identity.detach()
         return self
