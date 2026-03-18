@@ -33,7 +33,6 @@ class OnlineCovariance:
             self.__count = 0
             self.__mean = None
             self.__cov = None
-            self.__identity = None
 
         else:
             self.init_zeros(elements[0], device)
@@ -63,11 +62,6 @@ class OnlineCovariance:
         n = self.__order[-1]
         packed_size = n * (n + 1) // 2
         self.__cov = torch.zeros((*self.__shape[:-2], packed_size), dtype=self.__dtype, device=self.__device)
-        self.__identity = \
-            torch.eye(
-                self.__shape[-1], dtype=self.__dtype, device=self.__device
-            ).repeat((*self.__shape[:-2], 1, 1))
-
         if self.__detached:
             self.detach()
 
@@ -153,7 +147,15 @@ class OnlineCovariance:
     @property
     def identity(self):
         """ tensor, The identity in the shape of the added data. """
-        return self.__identity
+        return self.__make_identity()
+
+    def __make_identity(self):
+        """ Create an identity matrix on demand instead of storing it. """
+        if self.__shape is None:
+            return None
+        return torch.eye(
+            self.__shape[-1], dtype=self.__dtype, device=self.__device
+        ).expand(*self.__shape[:-2], -1, -1)
 
     def add(self, observation):
         """
@@ -320,13 +322,13 @@ class OnlineCovariance:
     def __compute_whitening(self):
         """ Compute the whitening matrix """
         val, vec = self.__compute_eig()
-        D_inv_sqrt = self.__expand_last_dim(1.0 / torch.sqrt(val)) * self.__identity
+        D_inv_sqrt = self.__expand_last_dim(1.0 / torch.sqrt(val)) * self.__make_identity()
         return (vec @ D_inv_sqrt @ vec.transpose(-2, -1))
 
     def __compute_whitening_inverse(self):
         """ Compute inverse of the whitening matrix """
         val, vec = self.__compute_eig()
-        D_sqrt = self.__expand_last_dim(torch.sqrt(val)) * self.__identity
+        D_sqrt = self.__expand_last_dim(torch.sqrt(val)) * self.__make_identity()
         return (vec @ D_sqrt @ vec.transpose(-2, -1))
 
     def to_inplace(self, device=None, dtype=None):
@@ -336,7 +338,6 @@ class OnlineCovariance:
             if self.__mean is not None:
                 self.__mean = self.__mean.to(self.__device)
                 self.__cov = self.__cov.to(self.__device)
-                self.__identity = self.__identity.to(self.__device)
                 if self.__eig_vectors is not None:
                     self.__eig_vectors = self.__eig_vectors.to(self.__device)
                 if self.__eig_values is not None:
@@ -347,7 +348,6 @@ class OnlineCovariance:
             if self.__mean is not None:
                 self.__mean = self.__mean.to(self.__dtype)
                 self.__cov = self.__cov.to(self.__dtype)
-                self.__identity = self.__identity.to(self.__dtype)
                 if self.__eig_vectors is not None:
                     self.__eig_vectors = self.__eig_vectors.to(self.__dtype)
                 if self.__eig_values is not None:
@@ -367,5 +367,4 @@ class OnlineCovariance:
         if not (self.__shape is None):
             self.__mean = self.__mean.detach()
             self.__cov = self.__cov.detach()
-            self.__identity = self.__identity.detach()
         return self
